@@ -1,12 +1,14 @@
 """Defines the main interface, i.e. the `ephem` function."""
-
+import os
 from functools import lru_cache
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time, TimeDelta
+from astropy.table import Table
 from astroquery.jplhorizons import Horizons
 from pandas import DataFrame, concat
 from scipy.interpolate import CubicSpline
@@ -51,15 +53,17 @@ class TessEphem:
             step=step,
             location=location,
         )
+        # eph = _get_neo_ephem(spkid=target, start=start, stop=stop)
         self._raf = create_angle_interpolator(
             eph["datetime_jd"], eph["RA"], enforce_positive=True
         )
         self._decf = create_angle_interpolator(eph["datetime_jd"], eph["DEC"])
         if "V" in eph.columns:
-            mag = eph["V"]
+            mag = np.array(eph["V"])
         else:
-            mag = eph["Tmag"]  # total comet magnitude
-        self._vf = CubicSpline(eph["datetime_jd"], mag)
+            mag = np.array(eph["Tmag"])  # total comet magnitude
+        if np.isfinite(mag).any():
+            self._vf = CubicSpline(eph["datetime_jd"], mag)
         # Absolute magnitude
         if "H" in eph.columns:
             self._Hf = CubicSpline(eph["datetime_jd"], eph["H"])
@@ -97,7 +101,11 @@ class TessEphem:
     def predict_sky(self, time: Time) -> DataFrame:
         ra = self._raf(time.jd)
         dec = self._decf(time.jd)
-        v = self._vf(time.jd)
+        # v = self._vf(time.jd)
+        if hasattr(self, "_vf"):
+            v = self._vf(time.jd)
+        else:
+            v = np.full(len(time.jd), np.nan)
         # If target does not have H magnitude, set to nan.
         if hasattr(self, "_Hf"):
             H = self._Hf(time.jd)
@@ -301,6 +309,45 @@ def _get_horizons_ephem(
     t = Horizons(id=id, id_type=id_type, location=location, epochs=epochs)
     result = t.ephemerides(quantities=quantities)
     log.debug(f"Received {len(result)} ephemeris results")
+    return result
+
+
+def _get_neo_ephem(
+    spkid: int,
+    start: Time,
+    stop: Time,
+):
+    fname = f"/Users/jimartin/Work/TESS/tess-asteroid-tracks/neos/data/tess_ephems/des_{spkid}.csv"
+    if os.path.isfile(fname):
+        df = pd.read_csv(fname, index_col=0)
+        result = df.query(f"datetime_jd >= {start.jd} and datetime_jd <= {stop.jd}").reset_index(drop=True)
+        result = Table.from_pandas(result)
+        result["datetime_jd"].unit = u.d
+        if "H" in result.columns:
+            result["H"].unit = u.mag
+        result["RA"].unit = u.deg
+        result["DEC"].unit = u.deg
+        result["RA_rate"].unit = u.arcsec / u.h
+        result["DEC_rate"].unit = u.arcsec / u.h
+        if "V" in result.columns:
+            result["V"].unit = u.mag
+        if "Tmag" in result.columns:
+            result["Tmag"].unit = u.mag
+        if "Nmag" in result.columns:
+            result["Nmag"].unit = u.mag
+        if "surfbright" in result.columns:
+            result["surfbright"].unit = u.mag / u.arcsec**2
+        result["r"].unit = u.AU
+        result["r_rate"].unit = u.km / u.s
+        result["delta"].unit = u.AU
+        result["delta_rate"].unit = u.km / u.s
+        result["TDB-UT"].unit = u.s
+        result["alpha_true"].unit = u.deg
+        result["PABLon"].unit = u.deg
+        result["PABLat"].unit = u.deg
+    else:
+        raise FileNotFoundError(f"Ephem file does not exist for {spkid}")
+
     return result
 
 
